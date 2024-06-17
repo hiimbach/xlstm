@@ -1,0 +1,38 @@
+# Description: Config file for sLSTM-only model
+training:
+  batch_size: 64
+  lr: 0.001
+  seed: 42
+  val_every_epoch: 1
+  num_epochs: 4
+  lr_warmup_steps: 1000
+  lr_decay_until_steps: 10000
+  lr_decay_factor: 0.001
+  weight_decay: 0.1
+  device: cpu
+  amp_precision: bfloat16
+  weight_precision: float32
+  enable_mixed_precision: true
+  save_checkpoint: 'checkpoints/test.pth'
+
+model:
+  num_blocks: 2
+  embedding_dim: 256
+  slstm_block:
+    slstm:
+      backend: vanilla
+      num_heads: 1
+  slstm_at: [0]
+  context_length: ${dataset.kwargs.context_length}
+  vocab_size: ${dataset.kwargs.vocab_size}
+
+tokenizer: VietAI/envit5-base
+
+dataset:
+  name: hiimbach/mtet
+  kwargs:
+    vocab_size: 50101
+    enable_mask: true
+    context_length: 256
+    min_sequence_length: 1
+    max_sequence_length: 40
