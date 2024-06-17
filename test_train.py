@@ -84,7 +84,7 @@ def main(cfg: DictConfig):
     train_test_split = smaller_dataset.train_test_split(test_size=0.1)
 
     train_dataset = HuggingFaceDataset(train_test_split['train'], tokenizer, cfg.model.context_length)
-    test_dataset = HuggingFaceDataset(train_test_split['train'], tokenizer, cfg.model.context_length)
+    test_dataset = HuggingFaceDataset(train_test_split['test'], tokenizer, cfg.model.context_length)
 
     # Loaders
     train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size)
@@ -129,7 +129,7 @@ def main(cfg: DictConfig):
         pbar = tqdm(train_loader, total=len(train_loader), initial=0)
         for inputs, labels in pbar:
             # import ipdb; ipdb.set_trace()
-            inputs.to(device=cfg.training.device)
+            inputs = inputs.to(device=cfg.training.device)
             labels = labels.to(device=cfg.training.device)
 
             optimizer.zero_grad()
@@ -159,8 +159,8 @@ def main(cfg: DictConfig):
             val_loss = 0.0
             model.eval()
             for inputs, labels in tqdm(val_loader, total=len(val_loader), initial=0):
-                val_inputs = torch.tensor(inputs).to(device=cfg.training.device)
-                val_labels = torch.tensor(labels).to(device=cfg.training.device)
+                val_inputs = inputs.to(device=cfg.training.device)
+                val_labels = labels.to(device=cfg.training.device)
 
                 with torch.no_grad():
                     with torch.autocast(

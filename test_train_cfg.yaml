@@ -4,7 +4,7 @@ training:
   lr: 0.001
   seed: 42
   val_every_epoch: 1
-  num_epochs: 4
+  num_epochs: 1
   lr_warmup_steps: 1000
   lr_decay_until_steps: 10000
   lr_decay_factor: 0.001
@@ -13,7 +13,7 @@ training:
   amp_precision: bfloat16
   weight_precision: float32
   enable_mixed_precision: true
-  save_checkpoint: 'checkpoints/test.pth'
+  save_checkpoint: 'test.pth'
 
 model:
   num_blocks: 2
