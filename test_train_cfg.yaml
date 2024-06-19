@@ -30,6 +30,7 @@ tokenizer: VietAI/envit5-base
 
 dataset:
   name: hiimbach/mtet
+  proportion: 0.001
   kwargs:
     vocab_size: 50101
     enable_mask: true

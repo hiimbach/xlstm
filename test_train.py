@@ -79,18 +79,23 @@ def main(cfg: DictConfig):
 
     # Load data
     dataset = load_dataset(cfg.dataset.name)
-    # train_test_split = dataset['train'].train_test_split(test_size=0.1)
-    smaller_dataset = dataset['train'].train_test_split(test_size=0.01)['test']
-    train_test_split = smaller_dataset.train_test_split(test_size=0.1)
 
-    train_dataset = HuggingFaceDataset(train_test_split['train'], tokenizer, cfg.model.context_length)
-    test_dataset = HuggingFaceDataset(train_test_split['test'], tokenizer, cfg.model.context_length)
+    # Use a proportion of the dataset
+    try:
+        propotion = cfg.dataset.proportion
+    except:
+        propotion = 1.0
+
+    train_len = int(propotion*len(dataset['train']['vi']))
+    val_len = int(propotion*len(dataset['test']['vi']))
+
+    train_dataset = HuggingFaceDataset(dataset['train'].select(range(train_len)), tokenizer, cfg.model.context_length)
+    test_dataset = HuggingFaceDataset(dataset['test'].select(range(val_len)), tokenizer, cfg.model.context_length)
 
     # Loaders
     train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size)
     val_loader = DataLoader(test_dataset, batch_size=cfg.training.batch_size)
     print("Finished loading data")
-    # import ipdb; ipdb.set_trace()
 
     # Init model
     model = xLSTMLMModel(from_dict(xLSTMLMModelConfig, OmegaConf.to_container(cfg.model))).to(
@@ -128,7 +133,6 @@ def main(cfg: DictConfig):
         model.train()
         pbar = tqdm(train_loader, total=len(train_loader), initial=0)
         for inputs, labels in pbar:
-            # import ipdb; ipdb.set_trace()
             inputs = inputs.to(device=cfg.training.device)
             labels = labels.to(device=cfg.training.device)
 
@@ -138,9 +142,7 @@ def main(cfg: DictConfig):
                 dtype=torch_dtype_map[cfg.training.amp_precision],
                 enabled=cfg.training.enable_mixed_precision,
             ):
-
                 outputs = model(inputs.to(device=cfg.training.device))
-                # import ipdb; ipdb.set_trace()
                 loss = nn.functional.cross_entropy(
                     outputs.view(-1, cfg.model.vocab_size),
                     labels.view(-1),
