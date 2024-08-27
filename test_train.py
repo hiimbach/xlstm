@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 from typing import Type
+import os
 
 import torch
 import torch.optim as optim
@@ -15,6 +16,8 @@ from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
+from nltk.translate.bleu_score import corpus_bleu
+from torch.utils.tensorboard import SummaryWriter
 
 from xlstm.xlstm_lm_model import xLSTMLMModel, xLSTMLMModelConfig
 
@@ -82,28 +85,37 @@ def main(cfg: DictConfig):
 
     # Use a proportion of the dataset
     try:
-        propotion = cfg.dataset.proportion
+        proportion = cfg.dataset.proportion
     except:
-        propotion = 1.0
+        proportion = 1.0
 
-    train_len = int(propotion*len(dataset['train']['vi']))
-    val_len = int(propotion*len(dataset['test']['vi']))
+    train_len = int(proportion*len(dataset['train']['vi']))
+    val_len = int(proportion*len(dataset['dev']['vi']))
+    test_len = int(proportion*len(dataset['test']['vi']))
 
     train_dataset = HuggingFaceDataset(dataset['train'].select(range(train_len)), tokenizer, cfg.model.context_length)
-    test_dataset = HuggingFaceDataset(dataset['test'].select(range(val_len)), tokenizer, cfg.model.context_length)
+    val_dataset = HuggingFaceDataset(dataset['dev'].select(range(val_len)), tokenizer, cfg.model.context_length)
+    test_dataset = HuggingFaceDataset(dataset['test'].select(range(test_len)), tokenizer, cfg.model.context_length)
 
     # Loaders
     train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size)
-    val_loader = DataLoader(test_dataset, batch_size=cfg.training.batch_size)
+    val_loader = DataLoader(val_dataset, batch_size=cfg.training.batch_size)
+    test_loader = DataLoader(test_dataset, batch_size = cfg.training.batch_size)
     print("Finished loading data")
 
     # Init model
     model = xLSTMLMModel(from_dict(xLSTMLMModelConfig, OmegaConf.to_container(cfg.model))).to(
         device=cfg.training.device
     )
+    
     model.reset_parameters()
+    if cfg.training.load_checkpoint:
+        model.load_state_dict(torch.load(cfg.training.load_checkpoint, map_location = torch.device(cfg.training.device)))
     model = model.to(dtype=torch_dtype_map[cfg.training.weight_precision])
     print("Model initialized")
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params}")
 
     # Load optimizer
     optim_groups = model._create_weight_decay_optim_groups()
@@ -123,10 +135,14 @@ def main(cfg: DictConfig):
         cfg.training.lr_decay_factor * cfg.training.lr,
     )
 
+    writer = SummaryWriter(f'{cfg.training.save_checkpoint}/runs')
+
     # Training loop
     step = 0
     running_loss = 0.0
     print("Start training\n")
+    if not os.path.exists(cfg.training.save_checkpoint):
+        os.makedirs(cfg.training.save_checkpoint)
 
     for epoch in range(1, (cfg.training.num_epochs+1)):
         print(f"Epoch: {epoch}/{cfg.training.num_epochs}")
@@ -153,9 +169,15 @@ def main(cfg: DictConfig):
                 optimizer.step()
                 lr_scheduler.step()
                 running_loss = running_loss*step / (step+1) + loss.item() / (step + 1)
-                pbar.set_description(f"Training Loss: {running_loss:.4f}")
+                pbar.set_description(f"Training Loss Epoch {epoch}: {running_loss:.4f}")
 
             step += 1
+            if step % cfg.training.log_every_step == 0:
+                print(f"Step: {step}, Loss: {running_loss:.4f}")
+                torch.save(model.state_dict(), f"{cfg.training.save_checkpoint}/latest.pth")
+                torch.save(model.state_dict(), f"{cfg.training.save_checkpoint}/e{epoch}s{step//cfg.training.log_every_step}.pth")
+                writer.add_scalar("Loss/train", running_loss, step//cfg.training.log_every_step)
+                
 
         if epoch % cfg.training.val_every_epoch == 0:
             val_loss = 0.0
@@ -179,13 +201,51 @@ def main(cfg: DictConfig):
                         # print("Val single loss", loss)
                         val_loss += loss.item()
             print(
-                f"Validation Loss: {(val_loss/len(val_loader)):.4f}"
+                f"Validation Loss Epoch {epoch}: {(val_loss/len(val_loader)):.4f}"
             )
-        print("")
+            writer.add_scalar("Loss/val", val_loss/len(val_loader), step//cfg.training.log_every_step)
+        
+        if epoch % cfg.training.test_every_epoch == 0:
+            references_list = []
+            translations = []
+            test_loss = 0.0
+            model.eval()
+            for inputs, labels in tqdm(test_loader, total=len(test_loader), initial=0):
+                test_inputs = inputs.to(device=cfg.training.device)
+                test_labels = labels.to(device=cfg.training.device)
 
-    # Save model
-    torch.save(model.state_dict(), cfg.training.save_checkpoint)
-    print(f"Model saved at {cfg.training.save_checkpoint}", )
+                with torch.no_grad():
+                    with torch.autocast(
+                        device_type=cfg.training.device,
+                        dtype=torch_dtype_map[cfg.training.amp_precision],
+                        enabled=cfg.training.enable_mixed_precision,
+                    ):
+                        test_outputs = model(test_inputs)
+                        loss = nn.functional.cross_entropy(
+                            test_outputs.view(-1, cfg.model.vocab_size),
+                            test_labels.view(-1),
+                            ignore_index=-1,
+                        )
+                        # print("Val single loss", loss)
+                        test_loss += loss.item()
+                        # token_indices = test_outputs.argmax(dim=-1)
+                        # candidates = [tokenizer.decode(tokens) for tokens in token_indices]
+                        # references = [tokenizer.decode(tokens) for tokens in test_labels]
+                        # references = [ref.split('<envi>')[-1].replace("<pad>", "").strip() for ref in references]
+                        # candidates = [can.split('<envi>')[-1].replace("<pad>", "").strip() for can in candidates]
+                        # for ref in references:
+                        #     references_list.append([ref.split(' ')])
+                        # for can in candidates:
+                        #     translations.append(can.split(' '))
+            print(f"Test Loss: {(test_loss/len(test_loader)):.4f}")
+            writer.add_scalar("Loss/test", test_loss/len(test_loader), step//cfg.training.log_every_step)
+            # bleu_score_corpus = corpus_bleu(references_list, translations)
+            # print(f'BLEU score: {bleu_score_corpus}')
+
+
+        # Save model
+        # torch.save(model.state_dict(), f"{cfg.training.save_checkpoint}/epoch{epoch}.pth")
+        # print(f"Model saved at {cfg.training.save_checkpoint}", )
 
 
 if __name__ == "__main__":
