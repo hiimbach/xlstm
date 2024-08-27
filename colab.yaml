@@ -1,10 +1,10 @@
 # Description: Config file for sLSTM-only model
 training:
-  batch_size: 64
+  batch_size: 16
   lr: 0.001
   seed: 42
   val_every_epoch: 1
-  num_epochs: 1
+  num_epochs: 100
   lr_warmup_steps: 1000
   lr_decay_until_steps: 10000
   lr_decay_factor: 0.001
@@ -13,26 +13,27 @@ training:
   amp_precision: bfloat16
   weight_precision: float32
   enable_mixed_precision: true
-  save_checkpoint: 'test_1024_1708'
-  load_checkpoint: 'test_1024.pth'
-  log_every_step: 50_000
+  save_checkpoint: 'test_1024_1708_2'
+  load_checkpoint: 'test_1024_1708_1/latest.pth'
+  test_every_epoch: 3
+  log_every_step: 15_000
 
 model:
   num_blocks: 2
   embedding_dim: 1024
-  slstm_block:
-    slstm:
-      backend: vanilla
+  mlstm_block:
+    mlstm:
       num_heads: 1
-  slstm_at: [0]
+  slstm_block: {}
+  slstm_at: []
   context_length: ${dataset.kwargs.context_length}
   vocab_size: ${dataset.kwargs.vocab_size}
 
 tokenizer: VietAI/envit5-base
 
 dataset:
-  name: hiimbach/mtet
-  proportion: 0.001
+  name: hiimbach/envi_translation
+  proportion: 0.1
   kwargs:
     vocab_size: 50101
     enable_mask: true
