@@ -9,15 +9,17 @@ training:
   lr_decay_until_steps: 10000
   lr_decay_factor: 0.001
   weight_decay: 0.1
-  device: cpu
+  device: cuda
   amp_precision: bfloat16
   weight_precision: float32
   enable_mixed_precision: true
-  save_checkpoint: 'test.pth'
+  save_checkpoint: 'test_1024_1708'
+  load_checkpoint: 'test_1024.pth'
+  log_every_step: 50_000
 
 model:
   num_blocks: 2
-  embedding_dim: 256
+  embedding_dim: 1024
   slstm_block:
     slstm:
       backend: vanilla

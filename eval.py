@@ -109,7 +109,7 @@ def main(cfg: DictConfig):
                     translations.append(can)
     
     import pickle
-    with open ('infer_result', 'wb') as fp:
+    with open ('infer_result.pkl', 'wb') as fp:
         pickle.dump(translations, fp)
     bleu_score_corpus = corpus_bleu(references_list, translations)
     print(f'Bleu score: {bleu_score_corpus}')
