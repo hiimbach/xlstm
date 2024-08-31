@@ -18,12 +18,9 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from nltk.translate.bleu_score import corpus_bleu
 from torch.utils.tensorboard import SummaryWriter
+from clearml import Task
 
 from xlstm.xlstm_lm_model import xLSTMLMModel, xLSTMLMModelConfig
-
-dataset_registry: dict[str, Type[DataGen]] = {
-    "form_language": FormLangDatasetGenerator
-}
 
 torch_dtype_map: dict[str, torch.dtype] = {
     "float32": torch.float32,
@@ -98,9 +95,9 @@ def main(cfg: DictConfig):
     test_dataset = HuggingFaceDataset(dataset['test'].select(range(test_len)), tokenizer, cfg.model.context_length)
 
     # Loaders
-    train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size)
-    val_loader = DataLoader(val_dataset, batch_size=cfg.training.batch_size)
-    test_loader = DataLoader(test_dataset, batch_size = cfg.training.batch_size)
+    train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=cfg.training.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size = cfg.training.batch_size, shuffle=True)
     print("Finished loading data")
 
     # Init model
@@ -113,6 +110,18 @@ def main(cfg: DictConfig):
         model.load_state_dict(torch.load(cfg.training.load_checkpoint, map_location = torch.device(cfg.training.device)))
     model = model.to(dtype=torch_dtype_map[cfg.training.weight_precision])
     print("Model initialized")
+    
+    if cfg.clearml_task_name:
+        # Create and connect a new task
+        task = Task.init(
+            project_name='xLSTM Translation',  # Project name in ClearML
+            task_name=cfg.clearml_task_name,        # Task name in ClearML
+            task_type=Task.TaskTypes.training  # Task type (training, testing, etc.)
+        )
+        
+        # Automatically log everything (hyperparameters, models, metrics, etc.)
+        task.connect_configuration(cfg)  # Optional: Log config dict
+        task.connect_model(model)        # Optional: Log model
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params}")
@@ -166,10 +175,17 @@ def main(cfg: DictConfig):
                 )
                 # print("singe loss", loss)
                 loss.backward()
+                
+                # Apply gradient clipping to avoid nan
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 lr_scheduler.step()
                 running_loss = running_loss*step / (step+1) + loss.item() / (step + 1)
                 pbar.set_description(f"Training Loss Epoch {epoch}: {running_loss:.4f}")
+                
+                if cfg.clearml_task_name:
+                    task.get_logger().report_scalar("Loss", "train", value=running_loss, iteration=step)
 
             step += 1
             if step % cfg.training.log_every_step == 0:
@@ -178,33 +194,38 @@ def main(cfg: DictConfig):
                 torch.save(model.state_dict(), f"{cfg.training.save_checkpoint}/e{epoch}s{step//cfg.training.log_every_step}.pth")
                 writer.add_scalar("Loss/train", running_loss, step//cfg.training.log_every_step)
                 
+                # Validation
+                val_loss = 0.0
+                model.eval()
+                for inputs, labels in tqdm(val_loader, total=len(val_loader), initial=0):
+                    val_inputs = inputs.to(device=cfg.training.device)
+                    val_labels = labels.to(device=cfg.training.device)
 
-        if epoch % cfg.training.val_every_epoch == 0:
-            val_loss = 0.0
-            model.eval()
-            for inputs, labels in tqdm(val_loader, total=len(val_loader), initial=0):
-                val_inputs = inputs.to(device=cfg.training.device)
-                val_labels = labels.to(device=cfg.training.device)
+                    with torch.no_grad():
+                        with torch.autocast(
+                            device_type=cfg.training.device,
+                            dtype=torch_dtype_map[cfg.training.amp_precision],
+                            enabled=cfg.training.enable_mixed_precision,
+                        ):
+                            val_outputs = model(val_inputs)
+                            loss = nn.functional.cross_entropy(
+                                val_outputs.view(-1, cfg.model.vocab_size),
+                                val_labels.view(-1),
+                                ignore_index=-1,
+                            )
+                            # print("Val single loss", loss)
+                            val_loss += loss.item()
+                            
+                # Log validation loss
+                avg_val_loss = val_loss/len(val_loader)
+                print(
+                    f"Validation Loss Epoch {epoch}: {avg_val_loss:.4f}"
+                )
+                writer.add_scalar("Loss/val", avg_val_loss, step//cfg.training.log_every_step)
+                
+            if cfg.clearml_task_name:
+                task.get_logger().report_scalar("Loss", "val", value=avg_val_loss, iteration=step)
 
-                with torch.no_grad():
-                    with torch.autocast(
-                        device_type=cfg.training.device,
-                        dtype=torch_dtype_map[cfg.training.amp_precision],
-                        enabled=cfg.training.enable_mixed_precision,
-                    ):
-                        val_outputs = model(val_inputs)
-                        loss = nn.functional.cross_entropy(
-                            val_outputs.view(-1, cfg.model.vocab_size),
-                            val_labels.view(-1),
-                            ignore_index=-1,
-                        )
-                        # print("Val single loss", loss)
-                        val_loss += loss.item()
-            print(
-                f"Validation Loss Epoch {epoch}: {(val_loss/len(val_loader)):.4f}"
-            )
-            writer.add_scalar("Loss/val", val_loss/len(val_loader), step//cfg.training.log_every_step)
-        
         if epoch % cfg.training.test_every_epoch == 0:
             references_list = []
             translations = []
@@ -226,32 +247,36 @@ def main(cfg: DictConfig):
                             test_labels.view(-1),
                             ignore_index=-1,
                         )
-                        # print("Val single loss", loss)
                         test_loss += loss.item()
-                        # token_indices = test_outputs.argmax(dim=-1)
-                        # candidates = [tokenizer.decode(tokens) for tokens in token_indices]
-                        # references = [tokenizer.decode(tokens) for tokens in test_labels]
-                        # references = [ref.split('<envi>')[-1].replace("<pad>", "").strip() for ref in references]
-                        # candidates = [can.split('<envi>')[-1].replace("<pad>", "").strip() for can in candidates]
-                        # for ref in references:
-                        #     references_list.append([ref.split(' ')])
-                        # for can in candidates:
-                        #     translations.append(can.split(' '))
-            print(f"Test Loss: {(test_loss/len(test_loader)):.4f}")
-            writer.add_scalar("Loss/test", test_loss/len(test_loader), step//cfg.training.log_every_step)
-            # bleu_score_corpus = corpus_bleu(references_list, translations)
-            # print(f'BLEU score: {bleu_score_corpus}')
-
-
-        # Save model
-        # torch.save(model.state_dict(), f"{cfg.training.save_checkpoint}/epoch{epoch}.pth")
-        # print(f"Model saved at {cfg.training.save_checkpoint}", )
+                        token_indices = test_outputs.argmax(dim=-1)
+                        candidates = [tokenizer.decode(tokens) for tokens in token_indices]
+                        references = [tokenizer.decode(tokens) for tokens in test_labels]
+                        references = [ref.split('<envi>')[-1].replace("<pad>", "").strip() for ref in references]
+                        candidates = [can.split('<envi>')[-1].replace("<pad>", "").strip() for can in candidates]
+                        for ref in references:
+                            references_list.append([ref.split(' ')])
+                        for can in candidates:
+                            translations.append(can.split(' '))
+                            
+            avg_test_loss = test_loss/len(test_loader)
+            print(f"Test Loss: {avg_test_loss:.4f}")
+            bleu_score_corpus = corpus_bleu(references_list, translations)
+            print(f'BLEU score: {bleu_score_corpus}')
+            
+            # Tensorboard
+            writer.add_scalar("Loss/test", avg_test_loss, epoch)
+            writer.add_scalar("BLEU", bleu_score_corpus, epoch)
+            
+            # Clearml 
+            if cfg.clearml_task_name:
+                task.get_logger().report_scalar("Loss", "test", value=avg_test_loss, iteration=epoch)
+                task.get_logger().report_scalar("BLEU", "test", value=bleu_score_corpus, iteration=epoch)
 
 
 if __name__ == "__main__":
 
     parser = ArgumentParser()
-    parser.add_argument("--config", default="test_train_cfg.yaml")
+    parser.add_argument("--config", default="colab.yaml")
 
     args = parser.parse_args()
 
