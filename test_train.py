@@ -179,31 +179,31 @@ def main(cfg: DictConfig):
                 writer.add_scalar("Loss/train", running_loss, step//cfg.training.log_every_step)
                 
 
-        if epoch % cfg.training.val_every_epoch == 0:
-            val_loss = 0.0
-            model.eval()
-            for inputs, labels in tqdm(val_loader, total=len(val_loader), initial=0):
-                val_inputs = inputs.to(device=cfg.training.device)
-                val_labels = labels.to(device=cfg.training.device)
+        # if step % cfg.training.log_every_step == 0:
+                val_loss = 0.0
+                model.eval()
+                for inputs, labels in tqdm(val_loader, total=len(val_loader), initial=0):
+                    val_inputs = inputs.to(device=cfg.training.device)
+                    val_labels = labels.to(device=cfg.training.device)
 
-                with torch.no_grad():
-                    with torch.autocast(
-                        device_type=cfg.training.device,
-                        dtype=torch_dtype_map[cfg.training.amp_precision],
-                        enabled=cfg.training.enable_mixed_precision,
-                    ):
-                        val_outputs = model(val_inputs)
-                        loss = nn.functional.cross_entropy(
-                            val_outputs.view(-1, cfg.model.vocab_size),
-                            val_labels.view(-1),
-                            ignore_index=-1,
-                        )
-                        # print("Val single loss", loss)
-                        val_loss += loss.item()
-            print(
-                f"Validation Loss Epoch {epoch}: {(val_loss/len(val_loader)):.4f}"
-            )
-            writer.add_scalar("Loss/val", val_loss/len(val_loader), step//cfg.training.log_every_step)
+                    with torch.no_grad():
+                        with torch.autocast(
+                            device_type=cfg.training.device,
+                            dtype=torch_dtype_map[cfg.training.amp_precision],
+                            enabled=cfg.training.enable_mixed_precision,
+                        ):
+                            val_outputs = model(val_inputs)
+                            loss = nn.functional.cross_entropy(
+                                val_outputs.view(-1, cfg.model.vocab_size),
+                                val_labels.view(-1),
+                                ignore_index=-1,
+                            )
+                            # print("Val single loss", loss)
+                            val_loss += loss.item()
+                print(
+                    f"Validation Loss Step {step}: {(val_loss/len(val_loader)):.4f}"
+                )
+                writer.add_scalar("Loss/val", val_loss/len(val_loader), step//cfg.training.log_every_step)
         
         if epoch % cfg.training.test_every_epoch == 0:
             references_list = []
